@@ -59,13 +59,20 @@ def build_condition_description() -> str:
     return "Temporary Invoixy Google Cloud Security Review access."
 
 
+def format_canonical_utc_timestamp(dt: datetime) -> str:
+    """
+    Format datetime strictly as UTC RFC3339 timestamp with seconds precision and literal 'Z'.
+    Truncates microseconds (never rounds upward).
+    """
+    if dt.tzinfo is None:
+        raise ValidationError("Naive datetime rejected; explicit UTC timezone required.")
+    dt_utc = dt.astimezone(timezone.utc).replace(microsecond=0)
+    return dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def build_condition_expression(expiry_utc: datetime) -> str:
     """Format CEL request.time timestamp expression in UTC with seconds precision."""
-    if expiry_utc.tzinfo is None:
-        expiry_utc = expiry_utc.replace(tzinfo=timezone.utc)
-    else:
-        expiry_utc = expiry_utc.astimezone(timezone.utc)
-    formatted = expiry_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    formatted = format_canonical_utc_timestamp(expiry_utc)
     return f'request.time < timestamp("{formatted}")'
 
 

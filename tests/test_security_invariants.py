@@ -17,7 +17,6 @@ class TestSecurityInvariants(unittest.TestCase):
             tree = ast.parse(content, filename=str(py_file))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Call):
-                    # Check keyword arguments for shell=True
                     for kw in node.keywords:
                         if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
                             self.fail(f"Found shell=True in {py_file} at line {node.lineno}")
@@ -44,6 +43,13 @@ class TestSecurityInvariants(unittest.TestCase):
                 content = f.read()
             self.assertNotIn("services enable", content, f"'services enable' found in {py_file}")
             self.assertNotIn("services.enable", content, f"'services.enable' found in {py_file}")
+
+    def test_no_raw_isoformat_in_condition_logic(self):
+        """Ensure raw isoformat is not used for condition formatting."""
+        cond_file = SRC_DIR / "conditions.py"
+        with open(cond_file, "r", encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn(".isoformat()", text, f"Found .isoformat() in {cond_file}")
 
 
 if __name__ == "__main__":

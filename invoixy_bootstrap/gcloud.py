@@ -57,6 +57,13 @@ class GcloudAdapter(ABC):
         pass
 
     @abstractmethod
+    def check_service_enabled(
+        self, project_id: str, service_name: str = "iam.googleapis.com"
+    ) -> Tuple[BootstrapStatus, bool]:
+        """Read-only check whether a service API is enabled on the target project."""
+        pass
+
+    @abstractmethod
     def describe_custom_role(
         self, project_id: str, role_id: str, expected_fingerprint: str
     ) -> Tuple[BootstrapStatus, Optional[List[str]]]:
@@ -115,7 +122,7 @@ class GcloudAdapter(ABC):
 
 
 class RealGcloudAdapter(GcloudAdapter):
-    """Production Gcloud adapter executing safe subprocess calls (shell=False)."""
+    """Production Gcloud adapter executing safe non-interactive subprocess calls (shell=False)."""
 
     def __init__(self, gcloud_path: Optional[str] = None):
         self.gcloud_bin = gcloud_path or shutil.which("gcloud")
@@ -124,12 +131,16 @@ class RealGcloudAdapter(GcloudAdapter):
         if not self.gcloud_bin:
             raise RuntimeError("gcloud executable not found in PATH.")
         full_args = [self.gcloud_bin] + args
+        child_env = os.environ.copy()
+        child_env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
         return subprocess.run(
             full_args,
             shell=False,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=child_env,
         )
 
     def get_version(self) -> Tuple[bool, str]:
@@ -189,6 +200,28 @@ class RealGcloudAdapter(GcloudAdapter):
         except Exception:
             return BootstrapStatus.PROJECT_NOT_ACCESSIBLE, None
 
+    def check_service_enabled(
+        self, project_id: str, service_name: str = "iam.googleapis.com"
+    ) -> Tuple[BootstrapStatus, bool]:
+        try:
+            res = self._run_cmd([
+                "services", "list",
+                f"--project={project_id}",
+                f"--filter=config.name:{service_name}",
+                "--format=json",
+            ], timeout=15)
+            if res.returncode != 0:
+                return BootstrapStatus.IAM_API_STATUS_UNKNOWN, False
+            data = json.loads(res.stdout)
+            if isinstance(data, list) and len(data) > 0:
+                for item in data:
+                    name = item.get("config", {}).get("name") or item.get("name", "")
+                    if service_name in name or item.get("state", "").upper() == "ENABLED":
+                        return BootstrapStatus.AUTHORIZED, True
+            return BootstrapStatus.IAM_API_DISABLED, False
+        except Exception:
+            return BootstrapStatus.IAM_API_STATUS_UNKNOWN, False
+
     def describe_custom_role(
         self, project_id: str, role_id: str, expected_fingerprint: str
     ) -> Tuple[BootstrapStatus, Optional[List[str]]]:
@@ -238,6 +271,7 @@ class RealGcloudAdapter(GcloudAdapter):
                 "iam", "roles", "create", role_id,
                 f"--project={project_id}",
                 f"--file={tmp_file}",
+                "--quiet",
                 "--format=json",
             ], timeout=20)
 
@@ -264,7 +298,6 @@ class RealGcloudAdapter(GcloudAdapter):
         expected_role_path = f"projects/{project_id}/roles/{role_id}"
 
         try:
-            # Request policy version 3 to ensure condition-aware binding representation
             res = self._run_cmd([
                 "projects", "get-iam-policy", project_id,
                 "--format=json",
@@ -323,6 +356,7 @@ class RealGcloudAdapter(GcloudAdapter):
                 f"--member={member}",
                 f"--role={expected_role_path}",
                 f"--condition={cond_str}",
+                "--quiet",
                 "--format=json",
             ], timeout=20)
             if res.returncode != 0:
@@ -348,6 +382,7 @@ class RealGcloudAdapter(GcloudAdapter):
                 f"--member={member}",
                 f"--role={expected_role_path}",
                 f"--condition={cond_str}",
+                "--quiet",
                 "--format=json",
             ], timeout=20)
             if res.returncode != 0:
@@ -367,16 +402,20 @@ class FakeGcloudAdapter(GcloudAdapter):
         configured_project: Optional[str] = "target-project-id",
         project_accessible: bool = True,
         project_active: bool = True,
+        iam_api_enabled: bool = True,
+        fail_service_check: bool = False,
     ):
         self.version = version
         self.active_account = active_account
         self.configured_project = configured_project
         self.project_accessible = project_accessible
         self.project_active = project_active
+        self.iam_api_enabled = iam_api_enabled
+        self.fail_service_check = fail_service_check
 
         # State storage
-        self.roles: Dict[str, Dict[str, Any]] = {}  # key: f"{project_id}/{role_id}" -> role_dict
-        self.bindings: Dict[str, List[Dict[str, Any]]] = {}  # key: project_id -> list of binding dicts
+        self.roles: Dict[str, Dict[str, Any]] = {}
+        self.bindings: Dict[str, List[Dict[str, Any]]] = {}
 
         # Simulation failure toggles
         self.fail_role_creation = False
@@ -407,6 +446,15 @@ class FakeGcloudAdapter(GcloudAdapter):
         if not self.project_active:
             return BootstrapStatus.PROJECT_NOT_ACTIVE, ProjectInfo(project_id=project_id, lifecycle_state="DELETE_REQUESTED")
         return BootstrapStatus.ROLE_EXACT_MATCH, ProjectInfo(project_id=project_id, project_number="123456789012", lifecycle_state="ACTIVE")
+
+    def check_service_enabled(
+        self, project_id: str, service_name: str = "iam.googleapis.com"
+    ) -> Tuple[BootstrapStatus, bool]:
+        if not self.caller_has_permissions or self.fail_service_check:
+            return BootstrapStatus.IAM_API_STATUS_UNKNOWN, False
+        if self.iam_api_enabled:
+            return BootstrapStatus.AUTHORIZED, True
+        return BootstrapStatus.IAM_API_DISABLED, False
 
     def describe_custom_role(
         self, project_id: str, role_id: str, expected_fingerprint: str

@@ -37,6 +37,8 @@ class BootstrapStatus(str, Enum):
     GCLOUD_NOT_FOUND = "GCLOUD_NOT_FOUND"
     GCLOUD_TOO_OLD = "GCLOUD_TOO_OLD"
     CONTRACT_INVALID = "CONTRACT_INVALID"
+    IAM_API_DISABLED = "IAM_API_DISABLED"
+    IAM_API_STATUS_UNKNOWN = "IAM_API_STATUS_UNKNOWN"
 
     # Mutation Failure States
     ROLE_CREATION_FAILED = "ROLE_CREATION_FAILED"
@@ -106,6 +108,7 @@ class PlanResult:
     diagnostics: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
+        from invoixy_bootstrap.conditions import format_canonical_utc_timestamp
         return {
             "schema_version": 1,
             "command": "plan",
@@ -121,7 +124,7 @@ class PlanResult:
             "role_status": self.role_status.value,
             "binding_status": self.binding_status.value,
             "overall_status": self.overall_status.value,
-            "proposed_expiry_utc": self.proposed_expiry_utc.isoformat() if self.proposed_expiry_utc else None,
+            "proposed_expiry_utc": format_canonical_utc_timestamp(self.proposed_expiry_utc) if self.proposed_expiry_utc else None,
             "proposed_mutations": self.proposed_mutations,
             "diagnostics": self.diagnostics,
         }
@@ -139,9 +142,12 @@ class ExecutionResult:
     authorization: Optional[Dict[str, Any]] = None
     changes: List[str] = field(default_factory=list)
     diagnostics: List[str] = field(default_factory=list)
-    execution_timestamp_utc: str = field(default_factory=lambda: datetime.now().isoformat())
+    execution_timestamp_utc: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
+        from datetime import timezone
+        from invoixy_bootstrap.conditions import format_canonical_utc_timestamp
+        exec_ts = self.execution_timestamp_utc or format_canonical_utc_timestamp(datetime.now(timezone.utc))
         return {
             "schema_version": self.schema_version,
             "command": self.command,
@@ -152,5 +158,5 @@ class ExecutionResult:
             "authorization": self.authorization,
             "changes": self.changes,
             "diagnostics": self.diagnostics,
-            "execution_timestamp_utc": self.execution_timestamp_utc,
+            "execution_timestamp_utc": exec_ts,
         }

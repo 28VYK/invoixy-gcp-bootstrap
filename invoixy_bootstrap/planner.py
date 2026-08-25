@@ -10,6 +10,7 @@ from invoixy_bootstrap.conditions import (
     build_condition_description,
     build_condition_expression,
     build_condition_title,
+    format_canonical_utc_timestamp,
     validate_audit_id,
     validate_project_id,
     validate_ttl_hours,
@@ -57,6 +58,7 @@ class BootstrapPlanner:
         project_id: str,
         audit_id: str,
         ttl_hours: int = DEFAULT_TTL_HOURS,
+        explicit_now: Optional[datetime] = None,
     ) -> PlanResult:
         """Perform a 100% read-only plan evaluation."""
         validate_project_id(project_id)
@@ -83,8 +85,13 @@ class BootstrapPlanner:
                 diagnostics=[f"Contract verification failed: {contract_err}"],
             )
 
-        now = self.clock()
-        expiry_utc = now + timedelta(hours=ttl)
+        now = explicit_now or self.clock()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        else:
+            now = now.astimezone(timezone.utc)
+        now = now.replace(microsecond=0)
+        expiry_utc = (now + timedelta(hours=ttl)).replace(microsecond=0)
 
         # 1. Inspect Gcloud Version & Environment
         ver_ok, ver_msg = self.gcloud.get_version()
@@ -133,14 +140,40 @@ class BootstrapPlanner:
                 diagnostics=[f"Project '{project_id}' is not accessible or not active (status: {proj_status.value})."],
             )
 
-        # 3. Inspect Custom Role
+        # 3. Read-Only IAM API Readiness Check
+        api_status, is_enabled = self.gcloud.check_service_enabled(project_id, "iam.googleapis.com")
+        if api_status != BootstrapStatus.AUTHORIZED or not is_enabled:
+            diag_msg = (
+                f"IAM API (iam.googleapis.com) is disabled on project '{project_id}'."
+                if api_status == BootstrapStatus.IAM_API_DISABLED
+                else f"Unable to verify IAM API enablement on project '{project_id}'."
+            )
+            return PlanResult(
+                contract_version=contract.contract_version,
+                role_id=contract.role_id,
+                permission_fingerprint=contract.permission_fingerprint,
+                scanner_member=contract.scanner_member,
+                audit_id=audit_id,
+                project_id=project_id,
+                active_account=active_account,
+                configured_project=configured_proj,
+                project_mismatch=proj_mismatch,
+                role_status=api_status,
+                binding_status=api_status,
+                overall_status=api_status,
+                proposed_expiry_utc=expiry_utc,
+                proposed_mutations=[],
+                diagnostics=[diag_msg],
+            )
+
+        # 4. Inspect Custom Role
         role_status, role_perms = self.gcloud.describe_custom_role(
             project_id=project_id,
             role_id=contract.role_id,
             expected_fingerprint=contract.permission_fingerprint,
         )
 
-        # 4. Inspect IAM Policy & Bindings
+        # 5. Inspect IAM Policy & Bindings
         b_status, bindings = self.gcloud.get_invoixy_bindings(
             project_id=project_id,
             role_id=contract.role_id,
@@ -202,7 +235,7 @@ class BootstrapPlanner:
         # Binding evaluation
         if len(audit_bindings) == 0:
             proposed_mutations.append("ADD_BINDING")
-            diagnostics.append(f"No existing binding for '{expected_cond_title}'; will create conditional binding expiring at {expiry_utc.isoformat()}.")
+            diagnostics.append(f"No existing binding for '{expected_cond_title}'; will create conditional binding expiring at {format_canonical_utc_timestamp(expiry_utc)}.")
             overall = BootstrapStatus.NOT_AUTHORIZED
         elif len(audit_bindings) == 1:
             eb = audit_bindings[0]
@@ -227,10 +260,12 @@ class BootstrapPlanner:
                 )
             if eb.is_expired:
                 proposed_mutations.append("ADD_BINDING")
-                diagnostics.append(f"Binding for '{expected_cond_title}' exists but is EXPIRED (expired at {eb.expires_at_utc.isoformat() if eb.expires_at_utc else 'unknown'}). Will re-authorize.")
+                exp_str = format_canonical_utc_timestamp(eb.expires_at_utc) if eb.expires_at_utc else "unknown"
+                diagnostics.append(f"Binding for '{expected_cond_title}' exists but is EXPIRED (expired at {exp_str}). Will re-authorize.")
                 overall = BootstrapStatus.EXPIRED_BINDING_PRESENT
             else:
-                diagnostics.append(f"Binding for '{expected_cond_title}' is already active and valid until {eb.expires_at_utc.isoformat() if eb.expires_at_utc else 'unknown'}. No mutation needed.")
+                exp_str = format_canonical_utc_timestamp(eb.expires_at_utc) if eb.expires_at_utc else "unknown"
+                diagnostics.append(f"Binding for '{expected_cond_title}' is already active and valid until {exp_str}. No mutation needed.")
                 overall = BootstrapStatus.ALREADY_AUTHORIZED
         else:
             diagnostics.append(f"Multiple ({len(audit_bindings)}) bindings found matching '{expected_cond_title}'. Ambiguous state.")
@@ -291,6 +326,11 @@ class BootstrapPlanner:
             )
 
         now = self.clock()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        else:
+            now = now.astimezone(timezone.utc)
+        now = now.replace(microsecond=0)
 
         ver_ok, ver_msg = self.gcloud.get_version()
         if not ver_ok:
@@ -384,7 +424,7 @@ class BootstrapPlanner:
             "role": target_b.role,
             "condition_title": target_b.condition_title,
             "condition_expression": target_b.condition_expression,
-            "expires_at_utc": target_b.expires_at_utc.isoformat() if target_b.expires_at_utc else None,
+            "expires_at_utc": format_canonical_utc_timestamp(target_b.expires_at_utc) if target_b.expires_at_utc else None,
             "is_expired": target_b.is_expired,
         }
 
@@ -418,7 +458,14 @@ class BootstrapPlanner:
         confirm_callback: Optional[Callable[[PlanResult], bool]] = None,
     ) -> ExecutionResult:
         """Execute plan and apply mutations with strict verification and partial-failure handling."""
-        plan_res = self.plan(project_id=project_id, audit_id=audit_id, ttl_hours=ttl_hours)
+        now = self.clock()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        else:
+            now = now.astimezone(timezone.utc)
+        now = now.replace(microsecond=0)
+
+        plan_res = self.plan(project_id=project_id, audit_id=audit_id, ttl_hours=ttl_hours, explicit_now=now)
 
         contract, _ = self._get_contract()
         if not contract or plan_res.overall_status == BootstrapStatus.CONTRACT_INVALID:
@@ -435,6 +482,8 @@ class BootstrapPlanner:
             BootstrapStatus.GCLOUD_TOO_OLD,
             BootstrapStatus.PROJECT_NOT_ACCESSIBLE,
             BootstrapStatus.PROJECT_NOT_ACTIVE,
+            BootstrapStatus.IAM_API_DISABLED,
+            BootstrapStatus.IAM_API_STATUS_UNKNOWN,
             BootstrapStatus.ROLE_DRIFT,
             BootstrapStatus.ROLE_DISABLED,
             BootstrapStatus.BINDING_DRIFT,
@@ -501,11 +550,11 @@ class BootstrapPlanner:
             changes.append(f"Created custom role '{contract.role_id}' with {contract.permission_count} permissions.")
             role_created_in_this_run = True
 
-        # 2. Binding Creation
+        # 2. Binding Creation (using the exact consistent expiry from plan)
         if "ADD_BINDING" in plan_res.proposed_mutations:
             cond_title = build_condition_title(audit_id)
             cond_desc = build_condition_description()
-            cond_expr = build_condition_expression(plan_res.proposed_expiry_utc or (self.clock() + timedelta(hours=ttl_hours)))
+            cond_expr = build_condition_expression(plan_res.proposed_expiry_utc or (now + timedelta(hours=ttl_hours)))
 
             ok, err = self.gcloud.add_iam_policy_binding(
                 project_id=project_id,

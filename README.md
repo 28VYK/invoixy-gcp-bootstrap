@@ -11,7 +11,8 @@
 - **Client-Side Execution**: You run this tool on your own workstation or Cloud Shell using your authenticated `gcloud` session.
 - **Zero Secrets Uploaded**: Invoixy never asks for service-account JSON keys, credentials, OAuth tokens, or administrative logins.
 - **Minimal Read-Only Scope**: Grants exactly one versioned custom role (`InvoixySecurityAuditorV1`) containing 42 control-plane metadata read permissions. Zero access to storage file contents, database tables, VM disks/consoles, or Secret Manager payloads.
-- **Strict Time Boundary**: All grants are automatically bound by a Google Cloud IAM Condition (`request.time < timestamp(...)`) with a default TTL of 8 hours (maximum 24 hours). Access ceases automatically at expiration.
+- **Strict Time Boundary**: All grants are automatically bound by a Google Cloud IAM Condition (`request.time < timestamp(...)`) with a default TTL of 8 hours (maximum 24 hours). Timestamps strictly follow canonical UTC RFC3339 format with seconds precision and literal 'Z' (`YYYY-MM-DDTHH:MM:SSZ`). Access ceases automatically at expiration.
+- **Zero API Enablement**: Bootstrap never enables Google Cloud APIs automatically. The Identity and Access Management (IAM) API (`iam.googleapis.com`) must already be enabled on the target project; if disabled, bootstrap fails closed without mutating the project.
 
 ---
 
@@ -66,5 +67,6 @@ All commands support `--json` output for automated workflows.
 | **Custom Role** | Strictly `projects/<PROJECT_ID>/roles/InvoixySecurityAuditorV1` (42 permissions) |
 | **Data Plane Access** | 0 storage object read, 0 log entry read, 0 secret payload access |
 | **Mutation Rights** | 0 write, 0 create, 0 update, 0 delete permissions |
-| **Time Ceiling** | Hard maximum 24-hour expiration condition |
-| **Subprocess Execution** | Direct argument arrays (`shell=False`), zero shell interpolation |
+| **API Management** | Zero automated API enablement (`iam.googleapis.com` must be pre-enabled) |
+| **Time Boundary** | Canonical UTC RFC3339 seconds with `Z` (`YYYY-MM-DDTHH:MM:SSZ`), max 24 hours |
+| **Subprocess Execution** | Direct argument arrays (`shell=False`), non-interactive (`--quiet`, `stdin=DEVNULL`, `CLOUDSDK_CORE_DISABLE_PROMPTS=1`) |

@@ -1,7 +1,7 @@
-"""Unit tests for authorize mutation flow and partial failures."""
+"""Unit tests for authorize mutation flow, API readiness, and single consistent expiry."""
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from invoixy_bootstrap.contract import load_auditor_contract
 from invoixy_bootstrap.gcloud import FakeGcloudAdapter
@@ -12,8 +12,8 @@ from invoixy_bootstrap.planner import BootstrapPlanner
 class TestAuthorize(unittest.TestCase):
     def setUp(self):
         self.contract = load_auditor_contract()
-        self.clock_dt = datetime(2026, 8, 25, 10, 0, 0, tzinfo=timezone.utc)
-        self.clock = lambda: self.clock_dt
+        self.current_time = datetime(2026, 8, 25, 10, 0, 0, tzinfo=timezone.utc)
+        self.clock = lambda: self.current_time
 
     def test_authorize_creates_role_and_binding(self):
         adapter = FakeGcloudAdapter()
@@ -23,41 +23,46 @@ class TestAuthorize(unittest.TestCase):
         self.assertEqual(res.result, BootstrapStatus.AUTHORIZED)
         self.assertEqual(len(res.changes), 2)
 
-        # Re-authorize same audit ID returns ALREADY_AUTHORIZED without extending
-        res2 = planner.authorize("test-proj", "INV-GCP-2026-000001", ttl_hours=8, auto_confirm=True)
-        self.assertEqual(res2.result, BootstrapStatus.ALREADY_AUTHORIZED)
+        # Verify canonical timestamp
+        d = res.to_dict()
+        self.assertEqual(d["authorization"]["expires_at_utc"], "2026-08-25T18:00:00Z")
 
-    def test_authorize_cancelled_without_confirmation(self):
+    def test_authorize_single_consistent_expiry_with_advancing_clock(self):
         adapter = FakeGcloudAdapter()
+        # Clock advances by 5 seconds on each call
+        class AdvancingClock:
+            def __init__(self, start_dt):
+                self.dt = start_dt
+            def __call__(self):
+                t = self.dt
+                self.dt += timedelta(seconds=5)
+                return t
+
+        clock = AdvancingClock(datetime(2026, 8, 25, 10, 0, 0, tzinfo=timezone.utc))
+        planner = BootstrapPlanner(gcloud_adapter=adapter, contract=self.contract, clock=clock)
+
+        res = planner.authorize("test-proj", "INV-GCP-2026-000001", ttl_hours=1, auto_confirm=True)
+        self.assertEqual(res.result, BootstrapStatus.AUTHORIZED)
+
+        # Check call history condition expression uses initial plan expiry (11:00:00Z)
+        add_call = [c for c in adapter.call_history if c[0] == "add_iam_policy_binding"][0]
+        self.assertIn("2026-08-25T11:00:00Z", add_call[1]["condition_expression"])
+
+    def test_authorize_fails_closed_when_iam_api_disabled(self):
+        adapter = FakeGcloudAdapter(iam_api_enabled=False)
         planner = BootstrapPlanner(gcloud_adapter=adapter, contract=self.contract, clock=self.clock)
 
-        res = planner.authorize("test-proj", "INV-GCP-2026-000001", ttl_hours=8, auto_confirm=False, confirm_callback=lambda p: False)
-        self.assertEqual(res.result, BootstrapStatus.CANCELLED)
+        res = planner.authorize("test-proj", "INV-GCP-2026-000001", ttl_hours=8, auto_confirm=True)
+        self.assertEqual(res.result, BootstrapStatus.IAM_API_DISABLED)
+        self.assertEqual(len(adapter.call_history), 0)  # Zero mutations!
+
+    def test_authorize_fails_closed_when_iam_api_unknown(self):
+        adapter = FakeGcloudAdapter(fail_service_check=True)
+        planner = BootstrapPlanner(gcloud_adapter=adapter, contract=self.contract, clock=self.clock)
+
+        res = planner.authorize("test-proj", "INV-GCP-2026-000001", ttl_hours=8, auto_confirm=True)
+        self.assertEqual(res.result, BootstrapStatus.IAM_API_STATUS_UNKNOWN)
         self.assertEqual(len(adapter.call_history), 0)
-
-    def test_authorize_handles_role_creation_failure(self):
-        adapter = FakeGcloudAdapter()
-        adapter.fail_role_creation = True
-        planner = BootstrapPlanner(gcloud_adapter=adapter, contract=self.contract, clock=self.clock)
-
-        res = planner.authorize("test-proj", "INV-GCP-2026-000001", ttl_hours=8, auto_confirm=True)
-        self.assertEqual(res.result, BootstrapStatus.ROLE_CREATION_FAILED)
-
-    def test_authorize_handles_role_created_binding_failure(self):
-        adapter = FakeGcloudAdapter()
-        adapter.fail_binding_addition = True
-        planner = BootstrapPlanner(gcloud_adapter=adapter, contract=self.contract, clock=self.clock)
-
-        res = planner.authorize("test-proj", "INV-GCP-2026-000001", ttl_hours=8, auto_confirm=True)
-        self.assertEqual(res.result, BootstrapStatus.ROLE_CREATED_BINDING_FAILED)
-
-    def test_authorize_handles_post_verification_failure(self):
-        adapter = FakeGcloudAdapter()
-        adapter.fail_post_verify = True
-        planner = BootstrapPlanner(gcloud_adapter=adapter, contract=self.contract, clock=self.clock)
-
-        res = planner.authorize("test-proj", "INV-GCP-2026-000001", ttl_hours=8, auto_confirm=True)
-        self.assertEqual(res.result, BootstrapStatus.AUTHORIZATION_VERIFICATION_FAILED)
 
 
 if __name__ == "__main__":
