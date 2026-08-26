@@ -20,11 +20,11 @@ This tool automates the client-side authorization lifecycle:
 
 ## 2. Security & Trust Model
 
-Invoixy operates under a strict **No-Customer-Secrets** and **Zero-Data-Access** security architecture:
+Invoixy operates under a strict **No Customer Secrets and No Workload Content Access** security architecture:
 
 - **Client-Side Execution**: You execute this tool locally using your existing, authenticated `gcloud` session.
-- **No Customer Secrets or Keys**: Invoixy never requests or accepts Google Service Account JSON keys, long-lived API tokens, OAuth refresh credentials, or administrative passwords. The scanner authenticates via short-lived Workload Identity Federation credentials, and bootstrap never creates service-account keys.
-- **Control Plane Only (Zero Data-Plane Access)**: The 42 granted permissions allow viewing configuration metadata only. The role contains:
+- **No Customer Secrets or Keys**: Invoixy bootstrap never requests or accepts customer-provided Google Service Account JSON keys, customer passwords, OAuth refresh credentials, or long-lived API tokens. Bootstrap never creates service-account keys. The scanner obtains short-lived Google access credentials through X.509 Workload Identity Federation.
+- **Control Plane Only (No Application-Data Access)**: Scanner review access is limited to the frozen read-only configuration and metadata contract. The scanner does not require access to stored application payloads, object contents, database contents, Secret Manager secret versions, or workload data. The custom role contains:
   - **Zero** storage object read permissions (`storage.objects.get` is strictly prohibited).
   - **Zero** secret payload access (`secretmanager.versions.access` is strictly prohibited).
   - **Zero** log payload extraction (`logging.logEntries.list` is strictly prohibited).

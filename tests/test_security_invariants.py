@@ -52,7 +52,7 @@ class TestSecurityInvariants(unittest.TestCase):
         self.assertNotIn(".isoformat()", text, f"Found .isoformat() in {cond_file}")
 
     def test_readme_and_source_no_inaccurate_security_claims(self):
-        """Ensure public documentation and source code contain no inaccurate zero-credential / credentialless claims."""
+        """Ensure public documentation and source code contain no inaccurate zero-credential / zero-data-access claims."""
         root_dir = Path(__file__).resolve().parent.parent
         readme_path = root_dir / "README.md"
         with open(readme_path, "r", encoding="utf-8") as f:
@@ -65,12 +65,27 @@ class TestSecurityInvariants(unittest.TestCase):
             "credentialless",
             "fully keyless",
             "no credentials",
+            "zero-data-access",
+            "zero data access",
+            "zero data-access",
         ]
         for phrase in inaccurate_phrases:
             self.assertNotIn(
                 phrase,
                 readme_text,
                 f"Inaccurate security claim '{phrase}' found in README.md",
+            )
+
+        required_phrases = [
+            "no customer secrets and no workload content access",
+            "no customer secrets or keys",
+            "short-lived google access credentials through x.509 workload identity federation",
+        ]
+        for phrase in required_phrases:
+            self.assertIn(
+                phrase,
+                readme_text,
+                f"Expected precise security wording '{phrase}' missing from README.md",
             )
 
 
