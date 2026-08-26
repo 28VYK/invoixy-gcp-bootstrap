@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from invoixy_bootstrap.cli import main
+from invoixy_bootstrap.conditions import build_condition_title
 from invoixy_bootstrap.gcloud import GcloudAdapter
 from invoixy_bootstrap.models import (
     BindingInfo,
@@ -387,12 +388,151 @@ class TestWizard(unittest.TestCase):
         self.assertIn("INVOIXY AUTHORIZATION STATUS", out)
         self.assertIn("Status:              AUTHORIZED", out)
 
-    def test_wizard_revoke_cancel_zero_mutation(self):
+    # 4. Wizard Revoke Flow Tests
+    def test_wizard_revoke_calls_status_before_revoke(self):
         self.planner.authorize("sample-proj", "INV-GCP-2026-000007", ttl_hours=8, auto_confirm=True)
+        call_order = []
+
+        orig_status = self.planner.status
+        orig_revoke = self.planner.revoke
+
+        def spy_status(*args, **kwargs):
+            call_order.append("status")
+            return orig_status(*args, **kwargs)
+
+        def spy_revoke(*args, **kwargs):
+            call_order.append("revoke")
+            return orig_revoke(*args, **kwargs)
+
+        self.planner.status = spy_status
+        self.planner.revoke = spy_revoke
+
         inputs = iter([
             "3",                      # Menu: Revoke
             "sample-proj",            # Project ID
             "INV-GCP-2026-000007",    # Audit ID
+            "yes",                    # Confirm
+            "4",                      # Exit
+        ])
+        code = run_wizard(
+            planner=self.planner,
+            gcloud=self.adapter,
+            input_fn=lambda _: next(inputs),
+            print_fn=self._print_capture,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(call_order, ["status", "revoke", "status", "status"])
+
+    def test_wizard_revoke_shows_active_authorization_before_confirmation(self):
+        self.planner.authorize("sample-proj", "INV-GCP-2026-000008", ttl_hours=8, auto_confirm=True)
+        expected_title = build_condition_title("INV-GCP-2026-000008")
+        inputs = iter([
+            "3",                      # Menu: Revoke
+            "sample-proj",            # Project ID
+            "INV-GCP-2026-000008",    # Audit ID
+            "no",                     # Cancel
+            "4",                      # Exit
+        ])
+        code = run_wizard(
+            planner=self.planner,
+            gcloud=self.adapter,
+            input_fn=lambda _: next(inputs),
+            print_fn=self._print_capture,
+        )
+        self.assertEqual(code, 0)
+        out = self._get_output()
+        self.assertIn("AUTHORIZATION IDENTIFIED FOR REVOCATION", out)
+        self.assertIn("Target Project:       sample-proj", out)
+        self.assertIn("Audit ID:             INV-GCP-2026-000008", out)
+        self.assertIn("Status:               AUTHORIZED", out)
+        self.assertIn(f"Condition Title:      {expected_title}", out)
+        self.assertIn("Is Expired:           No", out)
+        self.assertIn(f"Condition to remove:  {expected_title}", out)
+        self.assertIn("Custom role remains in project (InvoixySecurityAuditorV1).", out)
+
+    def test_wizard_revoke_not_authorized_does_not_call_revoke(self):
+        with patch.object(self.planner, "revoke") as mock_revoke:
+            inputs = iter([
+                "3",                      # Menu: Revoke
+                "sample-proj",            # Project ID
+                "INV-GCP-2026-000009",    # Audit ID (not authorized)
+                "4",                      # Exit
+            ])
+            code = run_wizard(
+                planner=self.planner,
+                gcloud=self.adapter,
+                input_fn=lambda _: next(inputs),
+                print_fn=self._print_capture,
+            )
+            self.assertEqual(code, 0)
+            out = self._get_output()
+            self.assertIn("Status:               NOT_AUTHORIZED", out)
+            self.assertIn("Notice: No active or expired binding found for this Audit ID. Nothing to revoke.", out)
+            mock_revoke.assert_not_called()
+
+    def test_wizard_revoke_expired_binding_shows_summary_and_allows_cleanup(self):
+        audit_id = "INV-GCP-2026-000010"
+        cond_title = build_condition_title(audit_id)
+        b = BindingInfo(
+            role="InvoixySecurityAuditorV1",
+            member="serviceAccount:scanner-v1@invoixy-security-core.iam.gserviceaccount.com",
+            condition_title=cond_title,
+            condition_description="Temporary conditional authorization for Invoixy Google Cloud Security Review",
+            condition_expression="request.time < timestamp('2026-01-01T00:00:00Z')",
+            is_exact_match=True,
+            is_expired=True,
+            expires_at_utc=datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        )
+        self.adapter.bindings.setdefault("sample-proj", []).append(b)
+        self.adapter.custom_roles["InvoixySecurityAuditorV1"] = ["compute.instances.get"] * 42
+
+        inputs = iter([
+            "3",                      # Menu: Revoke
+            "sample-proj",            # Project ID
+            audit_id,                 # Audit ID
+            "yes",                    # Confirm
+            "4",                      # Exit
+        ])
+        code = run_wizard(
+            planner=self.planner,
+            gcloud=self.adapter,
+            input_fn=lambda _: next(inputs),
+            print_fn=self._print_capture,
+        )
+        self.assertEqual(code, 0)
+        out = self._get_output()
+        self.assertIn("Status:               EXPIRED_BINDING_PRESENT", out)
+        self.assertIn("Is Expired:           Yes", out)
+        self.assertIn("REVOCATION SUCCESSFUL", out)
+        self.assertEqual(len(self.adapter.bindings.get("sample-proj", [])), 0)
+
+    def test_wizard_revoke_status_blocked_or_error_does_not_call_revoke(self):
+        self.adapter.custom_roles["InvoixySecurityAuditorV1"] = ["compute.instances.get"]  # 1 perm -> ROLE_DRIFT
+        with patch.object(self.planner, "revoke") as mock_revoke:
+            inputs = iter([
+                "3",
+                "sample-proj",
+                "INV-GCP-2026-000011",
+                "4",
+            ])
+            code = run_wizard(
+                planner=self.planner,
+                gcloud=self.adapter,
+                input_fn=lambda _: next(inputs),
+                print_fn=self._print_capture,
+            )
+            self.assertEqual(code, 0)
+            out = self._get_output()
+            self.assertIn("Status:               ROLE_DRIFT", out)
+            self.assertIn("Revocation blocked. Zero changes made.", out)
+            mock_revoke.assert_not_called()
+
+    def test_wizard_revoke_cancel_zero_mutation(self):
+        self.planner.authorize("sample-proj", "INV-GCP-2026-000012", ttl_hours=8, auto_confirm=True)
+        inputs = iter([
+            "3",                      # Menu: Revoke
+            "sample-proj",            # Project ID
+            "INV-GCP-2026-000012",    # Audit ID
             "no",                     # Cancel
             "4",                      # Exit
         ])
@@ -405,15 +545,14 @@ class TestWizard(unittest.TestCase):
         self.assertEqual(code, 0)
         out = self._get_output()
         self.assertIn("Revocation cancelled. Zero changes made.", out)
-        # Binding still exists
         self.assertEqual(len(self.adapter.bindings.get("sample-proj", [])), 1)
 
     def test_wizard_revoke_exact_binding_only(self):
-        self.planner.authorize("sample-proj", "INV-GCP-2026-000008", ttl_hours=8, auto_confirm=True)
+        self.planner.authorize("sample-proj", "INV-GCP-2026-000013", ttl_hours=8, auto_confirm=True)
         inputs = iter([
             "3",                      # Menu: Revoke
             "sample-proj",            # Project ID
-            "INV-GCP-2026-000008",    # Audit ID
+            "INV-GCP-2026-000013",    # Audit ID
             "yes",                    # Confirm
             "4",                      # Exit
         ])
@@ -427,6 +566,46 @@ class TestWizard(unittest.TestCase):
         out = self._get_output()
         self.assertIn("REVOCATION SUCCESSFUL", out)
         self.assertEqual(len(self.adapter.bindings.get("sample-proj", [])), 0)
+
+    def test_wizard_revoke_ctrl_c_during_confirmation_zero_mutation(self):
+        self.planner.authorize("sample-proj", "INV-GCP-2026-000014", ttl_hours=8, auto_confirm=True)
+        input_list = ["3", "sample-proj", "INV-GCP-2026-000014"]
+
+        def input_mock(prompt):
+            if input_list:
+                return input_list.pop(0)
+            raise KeyboardInterrupt()
+
+        code = run_wizard(
+            planner=self.planner,
+            gcloud=self.adapter,
+            input_fn=input_mock,
+            print_fn=self._print_capture,
+        )
+        self.assertEqual(code, 0)
+        out = self._get_output()
+        self.assertIn("Operation cancelled. Zero changes made.", out)
+        self.assertEqual(len(self.adapter.bindings.get("sample-proj", [])), 1)
+
+    def test_wizard_revoke_eof_during_confirmation_zero_mutation(self):
+        self.planner.authorize("sample-proj", "INV-GCP-2026-000015", ttl_hours=8, auto_confirm=True)
+        input_list = ["3", "sample-proj", "INV-GCP-2026-000015"]
+
+        def input_mock(prompt):
+            if input_list:
+                return input_list.pop(0)
+            raise EOFError()
+
+        code = run_wizard(
+            planner=self.planner,
+            gcloud=self.adapter,
+            input_fn=input_mock,
+            print_fn=self._print_capture,
+        )
+        self.assertEqual(code, 0)
+        out = self._get_output()
+        self.assertIn("Operation cancelled. Zero changes made.", out)
+        self.assertEqual(len(self.adapter.bindings.get("sample-proj", [])), 1)
 
     # 5. Domain Invariants
     def test_wizard_iam_api_disabled(self):

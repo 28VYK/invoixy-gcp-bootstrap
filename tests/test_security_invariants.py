@@ -51,6 +51,29 @@ class TestSecurityInvariants(unittest.TestCase):
             text = f.read()
         self.assertNotIn(".isoformat()", text, f"Found .isoformat() in {cond_file}")
 
+    def test_readme_and_source_no_inaccurate_security_claims(self):
+        """Ensure public documentation and source code contain no inaccurate zero-credential / credentialless claims."""
+        root_dir = Path(__file__).resolve().parent.parent
+        readme_path = root_dir / "README.md"
+        with open(readme_path, "r", encoding="utf-8") as f:
+            readme_text = f.read().lower()
+
+        inaccurate_phrases = [
+            "zero-credential",
+            "zero credential",
+            "zero credentials",
+            "credentialless",
+            "fully keyless",
+            "no credentials",
+        ]
+        for phrase in inaccurate_phrases:
+            self.assertNotIn(
+                phrase,
+                readme_text,
+                f"Inaccurate security claim '{phrase}' found in README.md",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
+

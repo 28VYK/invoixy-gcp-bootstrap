@@ -312,13 +312,50 @@ def _flow_revoke(
         print_fn("\nOperation cancelled.")
         return
 
-    expected_title = build_condition_title(audit_id)
     print_fn("")
+    print_fn("Inspecting authorization status...")
+    status_res = planner.status(project_id=project_id, audit_id=audit_id)
+
+    if status_res.result == BootstrapStatus.NOT_AUTHORIZED:
+        print_fn("")
+        print_fn(f"Target Project:       {project_id}")
+        print_fn(f"Audit ID:             {audit_id}")
+        print_fn(f"Status:               {status_res.result.value}")
+        print_fn("Notice: No active or expired binding found for this Audit ID. Nothing to revoke.")
+        return
+
+    if status_res.result not in {BootstrapStatus.AUTHORIZED, BootstrapStatus.EXPIRED_BINDING_PRESENT}:
+        print_fn("")
+        print_fn(f"Target Project:       {project_id}")
+        print_fn(f"Audit ID:             {audit_id}")
+        print_fn(f"Status:               {status_res.result.value}")
+        if status_res.diagnostics:
+            print_fn("Details:")
+            for d in status_res.diagnostics:
+                print_fn(f"  - {d}")
+        print_fn("Revocation blocked. Zero changes made.")
+        return
+
+    auth = status_res.authorization or {}
+    cond_title = auth.get("condition_title") or build_condition_title(audit_id)
+    expires_at = auth.get("expires_at_utc") or "N/A"
+    is_expired = auth.get("is_expired")
+    expired_str = "Yes" if is_expired else "No"
+
+    print_fn("")
+    print_fn("============================================================")
+    print_fn("AUTHORIZATION IDENTIFIED FOR REVOCATION")
+    print_fn("============================================================")
     print_fn(f"Target Project:       {project_id}")
     print_fn(f"Audit ID:             {audit_id}")
-    print_fn(f"Condition to Remove:  {expected_title}")
-    print_fn("")
-    print_fn("Note: The custom InvoixySecurityAuditorV1 role itself will remain in the project.")
+    print_fn(f"Status:               {status_res.result.value}")
+    print_fn(f"Condition Title:      {cond_title}")
+    print_fn(f"Expiration (UTC):     {expires_at}")
+    print_fn(f"Is Expired:           {expired_str}")
+    print_fn("------------------------------------------------------------")
+    print_fn(f"Condition to remove:  {cond_title}")
+    print_fn("Custom role remains in project (InvoixySecurityAuditorV1).")
+    print_fn("============================================================")
 
     try:
         ans = _safe_input("\nRevoke this authorization? [y/N]: ", input_fn=input_fn)
