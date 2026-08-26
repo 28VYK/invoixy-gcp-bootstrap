@@ -12,7 +12,6 @@ on:
         type: choice
         options:
           - "testpypi"
-          - "pypi"
 
 permissions:
   contents: read
@@ -68,7 +67,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI (OIDC Trusted Publishing)
     needs: build
-    if: (github.event_name == 'release' && github.event.action == 'published') || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi')
+    if: github.event_name == 'release' && github.event.action == 'published'
     runs-on: ubuntu-latest
     environment:
       name: pypi
