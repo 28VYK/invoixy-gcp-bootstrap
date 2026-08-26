@@ -7,12 +7,25 @@ name = "invoixy-gcp-bootstrap"
 version = "1.0.0"
 description = "Client-side IAM bootstrap and ephemeral permission lifecycle manager for Invoixy Google Cloud Security Review."
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
     { name = "Invoixy Security", email = "security@invoixy.com" }
 ]
 requires-python = ">=3.10"
 dependencies = []
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
 
 [project.scripts]
 invoixy-gcp-bootstrap = "invoixy_bootstrap.cli:main"

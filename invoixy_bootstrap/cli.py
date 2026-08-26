@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="invoixy-gcp-bootstrap",
         description="Client-side ephemeral IAM permission manager for Invoixy Google Cloud Security Review.",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command", required=False)
 
     # 1. PLAN
     p_plan = subparsers.add_parser("plan", help="Evaluate read-only authorization plan.")
@@ -86,6 +86,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command is None:
+        if sys.stdin.isatty():
+            from invoixy_bootstrap.wizard import run_wizard
+            return run_wizard()
+        else:
+            parser.print_help(sys.stderr)
+            print("\nError: interactive wizard requires an interactive TTY. Use explicit subcommands in scripts or automation.", file=sys.stderr)
+            return 1
 
     planner = BootstrapPlanner()
 
